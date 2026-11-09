@@ -349,6 +349,14 @@ Every round spends the person's money or quota. One that can't do anything shoul
 - [ ] Live-check #736 on Windows with gemini-cli: an empty app/ and a builder that claims `npm run build`
       stops after two turns (or 10 checks) with the "no files yet" note, and Try again doesn't restart it
 
+- [ ] A check round after a builder turn has a time limit too (#1198): #1287 gave one to the
+      builder's own checks only, and the round after each turn still passed none, so a check that
+      never finished held the run on "Checking the build…" — claimed: claude, branch bugfix/r5.3-check-round-limit
+- [ ] Pause reaches a check round waiting for the session (#981, #1198, #1147): the worker's plain
+      `engine.session()` waits ignore Pause, so the button stayed on "Pausing…" — claimed: claude, branch bugfix/r5.3-pause-at-lock-waits
+- [ ] A pause the worker doesn't answer within a minute still ends the run as paused and says what
+      it was on, so the project can be retried — claimed: claude, branch bugfix/r5.3-pause-escalates
+
 ### R5.4 Local models can build
 Owner: open · Status: todo
 The built-in agent loop assumes a capable tool-calling model. Reports #24, #44, #110, #403, #417 and

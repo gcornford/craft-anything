@@ -492,6 +492,12 @@ after every builder turn used, still passed `None`; #1198's build sat on "Checki
 the fix merged. When adding a limit or a stop to a shared function, grep every caller, and leave no
 production entry point without it (`run_checks` is now test-only).
 
+**A wait that Pause can't reach.** The rebuild worker read the session with `engine.session()`,
+which waits for as long as anything holds it, while tool calls already used `lock_unless` with the
+run's cancel token. A check round waiting behind a long tool call left the button on "Pausing…"
+for the holder's whole run (#981, #1198, #1147). Work that can be paused reads the session with
+`Engine::session_unless`, and reads it once per round rather than in each check.
+
 **An early error without a terminal event.** Model validation returned after reporting an error,
 but headless chat waits for `TurnDone`, not just an idle worker. Preflight failures and cancellation
 must finish the event sequence too; regression tests check both the error/status and the terminal event.

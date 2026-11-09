@@ -47,7 +47,7 @@ impl Worker {
         run: impl FnOnce() -> Result<Vec<CheckResult>, ToolError>,
     ) -> Result<Vec<CheckResult>, ToolError> {
         let extra = {
-            let session = self.engine.session();
+            let session = self.session()?;
             // The folder too: a copy of the project has none of the build outputs the round checked.
             let mut extra =
                 vec![ws.root.display().to_string(), kind.id().to_string(), ws.manifest.stack.clone(), format!("clean_room={}", session.clean_room())];

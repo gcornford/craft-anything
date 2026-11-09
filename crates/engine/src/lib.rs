@@ -153,6 +153,22 @@ impl Engine {
         self.session.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// [`Engine::session`] for work that can be stopped: gives up when `cancel` is cancelled
+    /// (Pause), or as soon as the holder looks stuck, instead of waiting on. A plain `session()`
+    /// waits out a long tool call however long it runs, and Pause can't reach it (#981, #1198).
+    #[track_caller]
+    pub fn session_unless(&self, cancel: &CancelToken) -> Result<MutexGuard<'_, Session>, ToolError> {
+        match self.session.lock_unless(&|| cancel.is_cancelled()) {
+            Ok(g) => Ok(g.unwrap_or_else(PoisonError::into_inner)),
+            Err(craft_anything_platform::sync::GaveUp::Stopped) => Err(ToolError::cancelled()),
+            Err(craft_anything_platform::sync::GaveUp::Stuck(why)) => {
+                Err(ToolError::new(ErrorCode::TimedOut, "Another part of the app is stuck, so this couldn't go on.")
+                    .with_remediation("Restart the app; your work is kept.")
+                    .with_details(serde_json::json!({"lock": why})))
+            }
+        }
+    }
+
     /// Try to lock without blocking (the UI uses this so a long tool never freezes a frame).
     #[track_caller]
     pub fn try_session(&self) -> Option<MutexGuard<'_, Session>> {

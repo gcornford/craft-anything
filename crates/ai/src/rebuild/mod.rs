@@ -595,6 +595,13 @@ impl Worker {
         emit_event(&self.feed, &self.tx, &self.wake, e);
     }
 
+    /// The engine's session, for the run's own reads: Pause reaches a wait for it, as it does a
+    /// tool call's (`Engine::call`). A plain `engine.session()` waits out whatever holds it.
+    #[track_caller]
+    fn session(&self) -> Result<craft_anything_platform::sync::MutexGuard<'_, craft_anything_engine::Session>, ToolError> {
+        self.engine.session_unless(&self.stop)
+    }
+
     fn step(&self, ws: &mut Workspace, step: Step, status: Status, text: &str) -> Result<(), ToolError> {
         self.stop.check()?;
         ws.set_status(status, text)?;
@@ -633,7 +640,7 @@ impl Worker {
     fn attach(&self, ws: &Workspace) -> Result<(), ToolError> {
         let dir = ws.investigation_dir();
         let project = Project::open(&dir).or_else(|_| Project::create(&dir, &ws.manifest.name, Purpose::default()))?;
-        let mut s = self.engine.session();
+        let mut s = self.session()?;
         s.open_project(project)?;
         s.ext.insert(Arc::new(InboxDir(ws.inbox_dir())));
         Ok(())
@@ -699,7 +706,7 @@ impl Worker {
     /// work, with the way to get it.
     fn find_editor(&self, stack: &str) -> Result<Option<PathBuf>, ToolError> {
         let Some(b) = game::Builder::from_stack(stack).filter(|b| *b != game::Builder::Rust) else { return Ok(None) };
-        let store = self.engine.session().settings.engine_store_dir();
+        let store = self.session()?.settings.engine_store_dir();
         let inv = game::inventory(&game::Places::here(store));
         match inv.best(b) {
             Some(i) if inv.ready(b) => Ok(Some(i.program.clone())),
@@ -714,7 +721,7 @@ impl Worker {
     /// Claude `--resume` that would continue the project's Deep session in Clean room is refused.
     fn agent_spec(&self, ws: &Workspace, entry: &crate::BackendEntry, opts: &RunOptions) -> Result<CliSpec, ToolError> {
         let (deep, config_dir, targets) = {
-            let session = self.engine.session();
+            let session = self.session()?;
             (!session.clean_room(), session.config_dir(), session.shared_targets())
         };
         refuse_deep_session_reuse_in_clean_room(ws, &entry.config.model, &entry.options.args, deep)?;
@@ -789,7 +796,7 @@ impl Worker {
                 .with_remediation("Describe what to make: a website, an app or a game.")
         };
         if ws.manifest.stack.is_empty() {
-            let deep = !self.engine.session().clean_room();
+            let deep = !self.session()?.clean_room();
             ws.manifest.stack = project::first_stack(&opts.kinds, ws, deep).ok_or_else(no_kind)?.to_string();
             ws.save()?;
         }
@@ -841,7 +848,7 @@ impl Worker {
             None => crate::cli_agents::builder_conversation(spec, self.approver(ws)),
         };
         // The builder's tool server is started in this run's mode (`--deep` or `--clean-room`).
-        let s = self.engine.session();
+        let s = self.session()?;
         let ghidra = s.settings.ghidra_launcher().is_some();
         let image_model = s.settings.assets.image_model.clone();
         drop(s);
@@ -1103,7 +1110,7 @@ impl Worker {
     /// before the build (the person owns the game and chose this; nothing is decrypted).
     fn extract(&mut self, ws: &mut Workspace, kind: &dyn kinds::TargetKind, name: &str, mut ex: crate::agent::ApiConversation) -> Result<(), ToolError> {
         let TargetRef::Local { path } = ws.manifest.target.clone() else { return Ok(()) };
-        if kind.id() != kinds::GameKind::ID || self.engine.session().clean_room() {
+        if kind.id() != kinds::GameKind::ID || self.session()?.clean_room() {
             return Ok(());
         }
         let folder = locate::game_folder(&path).unwrap_or(path);
@@ -1280,8 +1287,10 @@ impl Worker {
                 agent.stop();
             }
             for e in agent.poll() {
-                if matches!(e, AgentEvent::ToolFinished { .. } | AgentEvent::TurnDone { .. }) {
-                    let mut session = self.engine.session();
+                // Paused while the session is busy: skip the refresh, the loop stops the agent.
+                if matches!(e, AgentEvent::ToolFinished { .. } | AgentEvent::TurnDone { .. })
+                    && let Ok(mut session) = self.session()
+                {
                     let project = session.project.clone().filter(|project| project.root == ws.investigation_dir());
                     if let Some(project) = project
                         && let Err(error) = session.open_project(project)

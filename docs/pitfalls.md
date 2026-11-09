@@ -496,7 +496,9 @@ production entry point without it (`run_checks` is now test-only).
 which waits for as long as anything holds it, while tool calls already used `lock_unless` with the
 run's cancel token. A check round waiting behind a long tool call left the button on "Pausing…"
 for the holder's whole run (#981, #1198, #1147). Work that can be paused reads the session with
-`Engine::session_unless`, and reads it once per round rather than in each check.
+`Engine::session_unless`, and reads it once per round rather than in each check. A button that
+waits for work to answer needs a backstop for work that never does: a pause unanswered for
+`STOP_GRACE` ends the run as far as the person can see.
 
 **An early error without a terminal event.** Model validation returned after reporting an error,
 but headless chat waits for `TurnDone`, not just an idle worker. Preflight failures and cancellation

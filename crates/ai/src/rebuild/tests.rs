@@ -531,6 +531,7 @@ fn a_note_written_for_the_hook_carries_its_answers() {
         root: ws.root.clone(),
         started: Instant::now(),
         activity,
+        stop_watch: Default::default(),
     };
     let id = run.add_note("make it blue".into(), "make it blue".into(), Vec::new());
     let note = run.waiting().pop().unwrap();
@@ -3656,6 +3657,78 @@ fn pause_reaches_a_check_round_waiting_for_a_busy_session() {
     assert_eq!(e.code, ErrorCode::Cancelled, "{e:?}");
     assert!(took < HOLD / 2, "Pause must not wait for the session's holder: took {took:?}");
     assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0, "no check starts after Pause");
+}
+
+/// A run whose worker never answers Pause (stuck where Pause can't reach), as `start` builds one.
+fn silent_run(ws: &Workspace, grace: Duration) -> (RebuildRun, Sender<RunEvent>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let feed = Arc::new(Mutex::new(feed::FeedLog::open(ws)));
+    let activity = feed.lock().unwrap_or_else(PoisonError::into_inner).activity();
+    let run = RebuildRun {
+        rx,
+        stop: CancelToken::default(),
+        inbox: Inbox::new(ws.inbox_dir()),
+        running: Arc::new(AtomicBool::new(true)),
+        preview: Arc::default(),
+        notes: Arc::default(),
+        clean_room: false,
+        feed,
+        root: ws.root.clone(),
+        started: Instant::now(),
+        activity,
+        stop_watch: StopWatch { grace, ..Default::default() },
+    };
+    (run, tx)
+}
+
+fn finished(events: &[RunEvent]) -> Vec<(bool, String, bool)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::Finished { ok, message, paused } => Some((*ok, message.clone(), *paused)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// #981, #1198, #1147: Pause on a run that never answers still ends it after the grace, with
+/// the step it was on, once; the project is recorded paused so it can be continued. A run that
+/// answers in time is left to report itself.
+#[test]
+fn a_pause_the_run_never_answers_still_ends_it_after_the_grace() {
+    let d = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::create(d.path(), "Cloud hop", "Make a game", TargetRef::None).unwrap();
+    ws.set_status(Status::Checking, "Checking the build…").unwrap();
+    let (mut run, tx) = silent_run(&ws, Duration::from_millis(200));
+    let _ = tx.send(RunEvent::Step { step: Step::Check, text: "Checking the build (1 of 4): build…".into() });
+    run.activity.record(&RunEvent::Step { step: Step::Check, text: "Checking the build (1 of 4): build…".into() });
+    assert!(finished(&run.poll()).is_empty(), "nothing before Pause");
+    run.stop();
+    assert!(finished(&run.poll()).is_empty(), "the run gets its grace to answer");
+    assert!(run.is_running());
+    std::thread::sleep(Duration::from_millis(300));
+    let done = finished(&run.poll());
+    assert_eq!(done.len(), 1, "{done:?}");
+    let (ok, message, paused) = &done[0];
+    assert!(!ok && *paused, "{done:?}");
+    assert!(message.contains("didn't stop") && message.contains("Checking the build (1 of 4): build"), "names the step: {message}");
+    assert!(!run.is_running(), "the button leaves Pausing… and the project can be continued");
+    assert!(finished(&run.poll()).is_empty(), "said once");
+    assert!(run.stop_watch.finished.load(Ordering::SeqCst), "the worker, if it ever ends, doesn't say it again");
+    let began = Instant::now();
+    while Workspace::open(&ws.root).unwrap().manifest.status != Status::Stopped {
+        assert!(began.elapsed() < Duration::from_secs(5), "the pause is recorded in craft.json");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // A run that answers Pause in time reports itself; nothing is added.
+    let (mut answers, tx) = silent_run(&ws, Duration::from_millis(200));
+    answers.stop();
+    let _ = tx.send(RunEvent::Finished { ok: false, message: "Paused.".into(), paused: true });
+    answers.stop_watch.finished.store(true, Ordering::SeqCst);
+    answers.running.store(false, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(finished(&answers.poll()), [(false, "Paused.".to_string(), true)]);
 }
 
 /// Each check is said before it runs, as a step of its own, so a stall names the check it is in.

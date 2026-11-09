@@ -301,6 +301,10 @@ only when it's green and a maintainer has fully reviewed it, code as well as wor
       execution", the older copy of the standalone-server sentence, cut off after "both"
       — claimed: youkaicountry, branch docs/r5.2-opencode-doubled-passage
 
+- [ ] `toolchains::tests::go_launch_uses_one_command_package_and_prefers_root` fails on Windows
+      (found 2026-11-09 on `main`): it expects `./cmd\viewer` and gets `./cmd/viewer`. CI runs only
+      on Ubuntu, so nothing saw it; decide which form Go is handed on Windows and fix the test or the code
+
 ### R5.3 A builder that can't make progress stops
 Owner: open · Status: todo
 Every round spends the person's money or quota. One that can't do anything shouldn't start.
@@ -352,7 +356,7 @@ Every round spends the person's money or quota. One that can't do anything shoul
 - [x] A check round after a builder turn has a time limit too (#1198): #1287 gave one to the
       builder's own checks only, and the round after each turn still passed none, so a check that
       never finished held the run on "Checking the build…" — claimed: claude, branch bugfix/r5.3-check-round-limit
-- [ ] Pause reaches a check round waiting for the session (#981, #1198, #1147): the worker's plain
+- [x] Pause reaches a check round waiting for the session (#981, #1198, #1147): the worker's plain
       `engine.session()` waits ignore Pause, so the button stayed on "Pausing…" — claimed: claude, branch bugfix/r5.3-pause-at-lock-waits
 - [ ] A pause the worker doesn't answer within a minute still ends the run as paused and says what
       it was on, so the project can be retried — claimed: claude, branch bugfix/r5.3-pause-escalates

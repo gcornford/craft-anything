@@ -149,6 +149,11 @@ pub struct CheckCx<'a> {
     pub round: u32,
     /// When this round must stop, when it has a time limit (the builder's own checks do).
     until: Option<Instant>,
+    /// What the checks read from the session, read once when the round starts and in a way Pause
+    /// reaches: a check waiting for a busy session couldn't be paused (#981, #1198).
+    build: craft_anything_engine::settings::BuildSettings,
+    deep: bool,
+    engine_store: PathBuf,
 }
 
 /// Refuses once a round's time limit has passed. A check still running then gets this error from
@@ -240,19 +245,18 @@ impl CheckCx<'_> {
 
     /// How builds are judged (`[build]` in settings).
     pub fn build_settings(&self) -> craft_anything_engine::settings::BuildSettings {
-        self.worker.engine.session().settings.build.clone()
+        self.build.clone()
     }
 
     /// Deep mode is on (Ghidra enabled): the builder had to decompile a program target.
     pub fn deep(&self) -> bool {
-        !self.worker.engine.session().clean_room()
+        self.deep
     }
 
     /// The Godot installed on this computer, which opens a Godot project.
     pub fn godot(&self) -> Option<PathBuf> {
-        let store = self.worker.engine.session().settings.engine_store_dir();
         use craft_anything_engines::game as engine_game;
-        engine_game::inventory(&engine_game::Places::here(store)).best(engine_game::Builder::Godot).map(|i| i.program.clone())
+        engine_game::inventory(&engine_game::Places::here(self.engine_store.clone())).best(engine_game::Builder::Godot).map(|i| i.program.clone())
     }
 }
 
@@ -282,8 +286,11 @@ impl Worker {
     /// a stall names the check it is in.
     pub(super) fn run_checks_within(&self, ws: &Workspace, kind: &dyn TargetKind, round: u32, limit: Option<Duration>) -> Result<Vec<CheckResult>, ToolError> {
         let until = limit.map(|l| Instant::now() + l);
-        let mut cx = CheckCx { worker: self, ws, round, until };
-        let from_plugins = craft_anything_engine::wasm_plugins::checks(&self.engine.session());
+        let (from_plugins, build, deep, engine_store) = {
+            let session = self.session()?;
+            (craft_anything_engine::wasm_plugins::checks(&session), session.settings.build.clone(), !session.clean_room(), session.settings.engine_store_dir())
+        };
+        let mut cx = CheckCx { worker: self, ws, round, until, build, deep, engine_store };
         let plugin_checks = from_plugins
             .into_iter()
             .filter(|c| c.kinds.is_empty() || c.kinds.iter().any(|k| k == kind.id()))

@@ -21,7 +21,7 @@ impl Worker {
                     let _ = std::fs::remove_dir_all(&capture);
                 }
                 // The widths the check compares at, so every picture has its pair.
-                let widths = self.engine.session().settings.build.widths();
+                let widths = self.session()?.settings.build.widths();
                 self.call("web_site_capture", json!({"output_directory": capture.display().to_string(), "widths": widths, "noise_pass": true}))?;
                 // Menus, pop-ups and tabs, one at a time, on a computer and on a phone (where a menu
                 // button often replaces the navigation); a page without them (or a failure) is fine.
@@ -35,11 +35,11 @@ impl Worker {
                     }
                 }
                 self.capture_routes(ws, &url, &widths)?;
-                if !self.engine.session().clean_room() {
+                if !self.session()?.clean_room() {
                     self.how_it_works(ws, &url)?;
                 }
             }
-            TargetRef::Local { path } if self.engine.session().clean_room() => self.study_from_outside(ws, &path)?,
+            TargetRef::Local { path } if self.session()?.clean_room() => self.study_from_outside(ws, &path)?,
             TargetRef::Local { path } => {
                 self.step(ws, Step::Study, Status::Inspecting, "Looking inside it (nothing is run)…")?;
                 let (program, folder) = locate(&path, kind.studies_folder());
@@ -51,7 +51,7 @@ impl Worker {
                     Ok(out) => notes.push_str(&describe(&out)),
                     Err(e) => notes.push_str(&format!("A first look failed: {}\n", e.message)),
                 }
-                if !program.is_file() && !self.engine.session().clean_room() {
+                if !program.is_file() && !self.session()?.clean_room() {
                     self.step(
                         ws,
                         Step::Study,
@@ -105,7 +105,7 @@ impl Worker {
                 }
                 let capture = ws.capture_dir();
                 std::fs::create_dir_all(&capture).map_err(|e| ToolError::io(capture.display(), e))?;
-                let runtime = self.engine.session().settings.runtime_study;
+                let runtime = self.session()?.settings.runtime_study;
                 let mut console = false;
                 if runtime && program.is_file() && kinds::runs::is_console(&program) {
                     // A console program draws no window: run it with each input instead.
@@ -162,7 +162,7 @@ impl Worker {
             "# Clean room\n\nNothing inside {} was read: its files, its folder and its code stay closed, and the tools that look inside are off. Build from the person's request and description and the pictures in reference/, and ask them with core_person_ask when something isn't clear.\n",
             path.display()
         );
-        let runtime = self.engine.session().settings.runtime_study;
+        let runtime = self.session()?.settings.runtime_study;
         if runtime && path.is_file() && is_program(path) {
             notes.push_str(&self.picture_window(ws, path, &capture)?);
         }
@@ -197,7 +197,7 @@ impl Worker {
         let capture = ws.capture_dir();
         let read = |dir: &Path| std::fs::read(dir.join("capture.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
         let found = read(&capture).unwrap_or(Value::Null);
-        let max = self.engine.session().settings.build.max_pages.min(kinds::website::MAX_ROUTES);
+        let max = self.session()?.settings.build.max_pages.min(kinds::website::MAX_ROUTES);
         let picked = kinds::website::pick_routes(&found, start, max);
         let mut kept = self.capture_pages(ws, &picked, widths)?;
         // One level deeper: pages linked from the ones just captured, while there's room.
@@ -248,7 +248,7 @@ impl Worker {
             return None;
         }
         let settings = {
-            let s = self.engine.session();
+            let s = self.session().ok()?;
             if s.clean_room() || s.settings.ghidra_launcher().is_none() {
                 return None;
             }

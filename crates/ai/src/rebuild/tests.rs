@@ -3623,6 +3623,41 @@ fn the_check_round_after_a_turn_stops_at_its_time_limit_and_names_the_check() {
     assert_eq!(CHECK_ROUND_LIMIT, self_check::SELF_CHECK_LIMIT, "the same limit as the builder's own checks");
 }
 
+/// #981, #1198, #1147: Pause reaches a check round that waits for the session while something
+/// else holds it (a long tool call). Before, the round's plain `engine.session()` waited out the
+/// holder, so the button stayed on "Pausing…" for as long as the holder ran.
+#[test]
+fn pause_reaches_a_check_round_waiting_for_a_busy_session() {
+    const HOLD: Duration = Duration::from_secs(10);
+    let d = tempfile::tempdir().unwrap();
+    let ws = Workspace::create(d.path(), "Cloud hop", "Make a game", TargetRef::None).unwrap();
+    let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let w = check_worker(&ws, false);
+    let engine = w.engine.clone();
+    let (held, is_held) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let session = engine.session();
+        session.label("A long tool call");
+        held.send(()).unwrap();
+        let _ = released.recv_timeout(HOLD);
+    });
+    is_held.recv().unwrap();
+    let stop = w.stop.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        stop.cancel();
+    });
+    let began = Instant::now();
+    let e = w.checks_with_a_retry(&ws, &NeverEndsKind(runs.clone()), 1).expect_err("paused");
+    let took = began.elapsed();
+    let _ = release.send(());
+    holder.join().unwrap();
+    assert_eq!(e.code, ErrorCode::Cancelled, "{e:?}");
+    assert!(took < HOLD / 2, "Pause must not wait for the session's holder: took {took:?}");
+    assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0, "no check starts after Pause");
+}
+
 /// Each check is said before it runs, as a step of its own, so a stall names the check it is in.
 /// A real round's lines are Check steps (the feed, the CLI and the progress panel keep their
 /// stage); the builder's own checks belong to its Build turn.

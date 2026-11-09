@@ -228,6 +228,28 @@ pub struct RebuildRun {
     pub root: PathBuf,
     started: Instant,
     activity: Arc<activity::Activity>,
+    /// When Pause was pressed, and whether the run has said it finished.
+    stop_watch: StopWatch,
+}
+
+/// How long a run may take to answer Pause before it is reported paused anyway.
+pub const STOP_GRACE: Duration = Duration::from_secs(60);
+
+/// A pause that the worker doesn't answer (a step blocked where Pause can't reach it) still ends
+/// the run as far as the person can see, after [`STOP_GRACE`], so the button doesn't stay on
+/// "Pausing…" and the project can be continued (#981, #1198, #1147). Exactly one `Finished` is
+/// sent: whichever of the worker and this comes first.
+#[derive(Debug)]
+struct StopWatch {
+    asked: std::sync::OnceLock<Instant>,
+    finished: Arc<AtomicBool>,
+    grace: Duration,
+}
+
+impl Default for StopWatch {
+    fn default() -> Self {
+        StopWatch { asked: std::sync::OnceLock::new(), finished: Arc::default(), grace: STOP_GRACE }
+    }
 }
 
 impl RebuildRun {
@@ -305,6 +327,8 @@ impl RebuildRun {
             round_limit: CHECK_ROUND_LIMIT,
         };
         let r2 = running.clone();
+        let stop_watch = StopWatch::default();
+        let finished = stop_watch.finished.clone();
         let key_store = hub.keys.clone();
         std::thread::Builder::new()
             .name("rebuild".into())
@@ -323,12 +347,15 @@ impl RebuildRun {
                 // The CLI can exit as soon as it sees completion: release the helper while its
                 // supervisor threads are still available to stop it.
                 drop(awake);
-                ctx.emit(RunEvent::Finished { ok, message, paused });
+                // Already reported paused when it didn't answer Pause in time: say it once.
+                if !finished.swap(true, Ordering::SeqCst) {
+                    ctx.emit(RunEvent::Finished { ok, message, paused });
+                }
                 r2.store(false, Ordering::SeqCst);
             })
             .map_err(|e| ToolError::internal(e.to_string()))?;
         let activity = feed.lock().unwrap_or_else(PoisonError::into_inner).activity();
-        Ok(RebuildRun { rx, stop, inbox, running, preview, notes, clean_room, feed, root, started: Instant::now(), activity })
+        Ok(RebuildRun { rx, stop, inbox, running, preview, notes, clean_room, feed, root, started: Instant::now(), activity, stop_watch })
     }
 
     /// Add something while it works; the agent reads it at its next step, and only then does it
@@ -393,7 +420,42 @@ impl RebuildRun {
     }
 
     pub fn poll(&mut self) -> Vec<RunEvent> {
-        self.rx.try_iter().collect()
+        let mut out: Vec<RunEvent> = self.rx.try_iter().collect();
+        out.extend(self.overdue_pause());
+        out
+    }
+
+    /// The run was asked to pause [`STOP_GRACE`] ago and is still going: report it paused, with
+    /// the step it was on, and record that on a thread (this is called from the UI). The step is
+    /// left to end by itself; Pause already stops its programs, and its next look at Pause ends it.
+    fn overdue_pause(&self) -> Option<RunEvent> {
+        let asked = self.stop_watch.asked.get()?;
+        if !self.is_running() || asked.elapsed() < self.stop_watch.grace || self.stop_watch.finished.swap(true, Ordering::SeqCst) {
+            return None;
+        }
+        self.running.store(false, Ordering::SeqCst);
+        let on = self.activity_lines(self.activity_len().saturating_sub(1)..self.activity_len()).pop().map(|l| l.text);
+        let message = match on {
+            Some(on) => format!("Paused. A step didn't stop when asked, so it was left to end by itself (it was on: {on}). Send a message to continue."),
+            None => "Paused. A step didn't stop when asked, so it was left to end by itself. Send a message to continue.".to_string(),
+        };
+        let e = RunEvent::Finished { ok: false, message: message.clone(), paused: true };
+        let (root, feed, event) = (self.root.clone(), self.feed.clone(), e.clone());
+        let saved = std::thread::Builder::new().name("rebuild-paused".into()).spawn(move || {
+            feed.lock().unwrap_or_else(PoisonError::into_inner).record(&event);
+            match Workspace::open(&root) {
+                Ok(mut ws) => {
+                    if let Err(e) = ws.set_status(Status::Stopped, message) {
+                        log::warn!("Couldn't record the pause: {}", e.message);
+                    }
+                }
+                Err(e) => log::warn!("Couldn't record the pause: {}", e.message),
+            }
+        });
+        if let Err(e) = saved {
+            log::warn!("Couldn't record the pause: {e}");
+        }
+        Some(e)
     }
 
     /// The project's conversation as the run has it now, for showing a project that is already
@@ -417,6 +479,7 @@ impl RebuildRun {
     }
 
     pub fn stop(&self) {
+        let _ = self.stop_watch.asked.set(Instant::now());
         self.stop.cancel();
     }
 

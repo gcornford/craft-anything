@@ -358,7 +358,7 @@ Every round spends the person's money or quota. One that can't do anything shoul
       never finished held the run on "Checking the build…" — claimed: claude, branch bugfix/r5.3-check-round-limit
 - [x] Pause reaches a check round waiting for the session (#981, #1198, #1147): the worker's plain
       `engine.session()` waits ignore Pause, so the button stayed on "Pausing…" — claimed: claude, branch bugfix/r5.3-pause-at-lock-waits
-- [ ] A pause the worker doesn't answer within a minute still ends the run as paused and says what
+- [x] A pause the worker doesn't answer within a minute still ends the run as paused and says what
       it was on, so the project can be retried — claimed: claude, branch bugfix/r5.3-pause-escalates
 
 ### R5.4 Local models can build

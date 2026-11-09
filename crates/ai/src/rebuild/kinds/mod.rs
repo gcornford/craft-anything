@@ -172,7 +172,8 @@ pub struct CheckStop {
 
 impl CheckStop {
     /// A stop that also runs out at `until` (a round's time limit).
-    #[cfg(test)]
+    // Only Unix tests use it (they start `sh`); on Windows it would be dead code.
+    #[cfg(all(test, unix))]
     pub(crate) fn limited(until: Instant) -> CheckStop {
         CheckStop { stop: CancelToken::default(), until: Some(until) }
     }
@@ -267,7 +268,9 @@ pub(super) fn plugin_ids(session: &craft_anything_engine::Session, kind: &dyn Ta
 impl Worker {
     /// Run the checks the kind asks for in this round, in order, then the WASM plugins' checks for
     /// this kind. One that fails stops the rest: a later check needs what an earlier one proved (a
-    /// screenshot needs a build).
+    /// screenshot needs a build). Tests only: every round the app runs has a time limit
+    /// ([`Worker::run_checks_within`]), since one without it held a run for hours (#1198).
+    #[cfg(test)]
     pub(super) fn run_checks(&self, ws: &Workspace, kind: &dyn TargetKind, round: u32) -> Result<Vec<CheckResult>, ToolError> {
         self.run_checks_within(ws, kind, round, None)
     }
@@ -304,7 +307,14 @@ impl Worker {
             // the CLI and the progress panel show.
             let (step, doing) = if round == self_check::SELF_CHECK_ROUND { (Step::Build, "Checking its work") } else { (Step::Check, "Checking the build") };
             self.emit(RunEvent::Step { step, text: format!("{doing} ({} of {}): {}…", i + 1, checks.len(), c.id()) });
-            let r = c.run(&mut cx)?;
+            // A check stopped at the round's limit says which check it was, so the feed and the
+            // error name what took too long.
+            let r = c.run(&mut cx).map_err(|mut e| {
+                if e.code == craft_anything_evidence::ErrorCode::TimedOut {
+                    e.message = format!("{}: {}", c.id(), e.message);
+                }
+                e
+            })?;
             let failed = !r.passed;
             out.push(r);
             if failed {

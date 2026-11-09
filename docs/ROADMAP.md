@@ -349,7 +349,7 @@ Every round spends the person's money or quota. One that can't do anything shoul
 - [ ] Live-check #736 on Windows with gemini-cli: an empty app/ and a builder that claims `npm run build`
       stops after two turns (or 10 checks) with the "no files yet" note, and Try again doesn't restart it
 
-- [ ] A check round after a builder turn has a time limit too (#1198): #1287 gave one to the
+- [x] A check round after a builder turn has a time limit too (#1198): #1287 gave one to the
       builder's own checks only, and the round after each turn still passed none, so a check that
       never finished held the run on "Checking the build…" — claimed: claude, branch bugfix/r5.3-check-round-limit
 - [ ] Pause reaches a check round waiting for the session (#981, #1198, #1147): the worker's plain

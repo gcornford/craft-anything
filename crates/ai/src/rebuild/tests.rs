@@ -452,6 +452,7 @@ fn notes_added_while_it_works_reach_the_agent_at_its_next_step() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        round_limit: CHECK_ROUND_LIMIT,
         assets: false,
         decompiled: false,
         usage: None,
@@ -1360,6 +1361,7 @@ fn an_api_backend_builds_with_the_build_tools() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        round_limit: CHECK_ROUND_LIMIT,
         assets: false,
         decompiled: false,
         usage: None,
@@ -1479,6 +1481,7 @@ fn the_mechanics_sheet_is_required_and_held_against_the_code() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        round_limit: CHECK_ROUND_LIMIT,
         assets: false,
         decompiled: false,
         usage: None,
@@ -2604,6 +2607,7 @@ fn check_worker(ws: &Workspace, deep: bool) -> Worker {
         reset_progress_after_notes: false,
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        round_limit: CHECK_ROUND_LIMIT,
     }
 }
 
@@ -3155,6 +3159,7 @@ fn preparing_the_builders_agent_does_not_lock_up() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        round_limit: CHECK_ROUND_LIMIT,
         assets: false,
         decompiled: false,
         usage: None,
@@ -3199,6 +3204,7 @@ fn the_run_answers_the_builders_own_check_during_its_turn() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        round_limit: CHECK_ROUND_LIMIT,
         assets: false,
         decompiled: false,
         usage: None,
@@ -3398,6 +3404,7 @@ fn a_note_the_builder_took_at_a_step_joins_the_feed_and_isnt_sent_again() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        round_limit: CHECK_ROUND_LIMIT,
         assets: false,
         decompiled: false,
         usage: None,
@@ -3547,6 +3554,73 @@ fn a_self_check_round_stops_at_pause_and_at_its_time_limit() {
     let r = check_worker(&ws, false).run_checks_within(&ws, &GameKind, round, Some(Duration::from_secs(600))).unwrap();
     assert_eq!(r.len(), 2, "{r:?}");
     assert!(r.iter().all(|c| c.passed), "{r:?}");
+}
+
+/// A check that never finishes by itself: it gives up only when the round tells it to stop, and
+/// after `GIVE_UP` says that nothing did (so a missing limit fails the test instead of hanging it).
+struct NeverEnds(Arc<std::sync::atomic::AtomicUsize>);
+
+impl NeverEnds {
+    const GIVE_UP: Duration = Duration::from_secs(10);
+}
+
+impl Check for NeverEnds {
+    fn id(&self) -> &'static str {
+        "never-ends"
+    }
+    fn run(&self, cx: &mut CheckCx) -> Result<CheckResult, ToolError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let began = Instant::now();
+        while began.elapsed() < Self::GIVE_UP {
+            cx.stop().check()?;
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(CheckResult::new(self.id(), cx.round, true, "nothing stopped it"))
+    }
+}
+
+struct NeverEndsKind(Arc<std::sync::atomic::AtomicUsize>);
+
+impl TargetKind for NeverEndsKind {
+    fn id(&self) -> &'static str {
+        "never-ends"
+    }
+    fn words(&self) -> KindWords {
+        KindWords { button: "Open", icon: "app", ready: "Ready", change_hint: "Ask for a change" }
+    }
+    fn detect(&self, _cx: &DetectCx) -> Option<u32> {
+        None
+    }
+    fn default_stack(&self, _cx: &DetectCx) -> &'static str {
+        "Rust"
+    }
+    fn goal(&self) -> &'static str {
+        "an app"
+    }
+    fn checks(&self, _ws: &Workspace) -> Vec<Box<dyn Check>> {
+        vec![Box::new(NeverEnds(self.0.clone()))]
+    }
+}
+
+/// #1198: the round after a builder turn has a time limit, as the builder's own checks do
+/// (#1287). A check that never finishes is stopped at the limit, the error names it and says
+/// Try again only checks, and a round that ran out of time isn't run a second time.
+#[test]
+fn the_check_round_after_a_turn_stops_at_its_time_limit_and_names_the_check() {
+    let d = tempfile::tempdir().unwrap();
+    let ws = Workspace::create(d.path(), "Cloud hop", "Make a game", TargetRef::None).unwrap();
+    let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut w = check_worker(&ws, false);
+    w.round_limit = Duration::from_millis(300);
+    let began = Instant::now();
+    let e = w.checks_with_a_retry(&ws, &NeverEndsKind(runs.clone()), 1).expect_err("a check that never ends must not pass");
+    let took = began.elapsed();
+    assert!(took < NeverEnds::GIVE_UP / 2, "stopped by the limit, not by the check giving up: {took:?}");
+    assert_eq!(e.code, ErrorCode::TimedOut, "{e:?}");
+    assert!(e.message.contains("couldn't be checked") && e.message.contains("never-ends"), "names the check: {}", e.message);
+    assert!(e.remediation.as_deref().is_some_and(|r| r.contains("Try again")), "{e:?}");
+    assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1, "a round that ran out of time isn't run again");
+    assert_eq!(CHECK_ROUND_LIMIT, self_check::SELF_CHECK_LIMIT, "the same limit as the builder's own checks");
 }
 
 /// Each check is said before it runs, as a step of its own, so a stall names the check it is in.
@@ -3758,6 +3832,7 @@ fn a_session_left_on_another_computer_starts_a_new_one_from_the_project() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        round_limit: CHECK_ROUND_LIMIT,
         assets: false,
         decompiled: false,
         usage: None,
@@ -3815,6 +3890,7 @@ fn a_missing_session_with_nothing_to_start_from_is_said_plainly() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        round_limit: CHECK_ROUND_LIMIT,
         assets: false,
         decompiled: false,
         usage: None,
@@ -3883,6 +3959,7 @@ fn the_builders_conversation_travels_with_the_project() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        round_limit: CHECK_ROUND_LIMIT,
         assets: false,
         decompiled: false,
         usage: None,
@@ -3962,6 +4039,7 @@ fn a_build_says_when_it_waits_for_an_analysis_started_earlier() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        round_limit: CHECK_ROUND_LIMIT,
         assets: false,
         decompiled: false,
         usage: None,

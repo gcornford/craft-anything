@@ -486,6 +486,12 @@ A check that's cut off is a failed check with its reason, never a silent wait. A
 run can end — including a caught bug — records the project's status: leaving the last status on
 disk ("Checking" while nothing runs) reads as a stuck build that can't be retried.
 
+**A limit added to one caller of a shared function.** #1287 gave the builder's own check round a
+30-minute limit through `run_checks_within(.., Some(limit))`, while `run_checks`, which the round
+after every builder turn used, still passed `None`; #1198's build sat on "Checking the build…" with
+the fix merged. When adding a limit or a stop to a shared function, grep every caller, and leave no
+production entry point without it (`run_checks` is now test-only).
+
 **An early error without a terminal event.** Model validation returned after reporting an error,
 but headless chat waits for `TurnDone`, not just an idle worker. Preflight failures and cancellation
 must finish the event sequence too; regression tests check both the error/status and the terminal event.

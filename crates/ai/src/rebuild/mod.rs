@@ -302,6 +302,7 @@ impl RebuildRun {
             reset_progress_after_notes: false,
             keys: hub.keys.clone(),
             kept_checks: Mutex::default(),
+            round_limit: CHECK_ROUND_LIMIT,
         };
         let r2 = running.clone();
         let key_store = hub.keys.clone();
@@ -498,6 +499,8 @@ struct Worker {
     reset_progress_after_notes: bool,
     /// The backends' stored keys, for an agent CLI that asks the host to authenticate (Devin).
     keys: crate::keys::KeyStore,
+    /// How long a round of checks after a builder turn may take ([`CHECK_ROUND_LIMIT`]; shorter in tests).
+    round_limit: Duration,
     /// The last check round in which everything worked, kept while nothing it looks at changes.
     kept_checks: Mutex<kept_check::KeptChecks>,
 }
@@ -1125,18 +1128,24 @@ impl Worker {
     }
 
     fn checks_with_a_retry_now(&self, ws: &Workspace, kind: &dyn kinds::TargetKind, round: u32) -> Result<Vec<CheckResult>, ToolError> {
-        let e = match self.run_checks(ws, kind, round) {
-            Err(e) if e.code != ErrorCode::Cancelled => e,
-            done => return done,
-        };
-        self.emit(RunEvent::Agent(AgentEvent::Status { text: format!("The check couldn't finish ({}). Trying it once more…", e.message) }));
-        self.run_checks(ws, kind, round).map_err(|e| {
+        // The round has a time limit, as the builder's own checks do (#1287): without one, a
+        // check that never finished held the run on "Checking the build…" for hours (#1198).
+        let limit = Some(self.round_limit);
+        let couldnt = |e: ToolError| {
             if e.code == ErrorCode::Cancelled {
                 return e;
             }
             ToolError::new(e.code, format!("The build is finished, but it couldn't be checked: {}", e.message))
                 .with_remediation("Press Try again to check it again. Nothing needs building again.")
-        })
+        };
+        let e = match self.run_checks_within(ws, kind, round, limit) {
+            // A round that ran out of time would only run out again: one wait is enough.
+            Err(e) if e.code == ErrorCode::TimedOut => return Err(couldnt(e)),
+            Err(e) if e.code != ErrorCode::Cancelled => e,
+            done => return done,
+        };
+        self.emit(RunEvent::Agent(AgentEvent::Status { text: format!("The check couldn't finish ({}). Trying it once more…", e.message) }));
+        self.run_checks_within(ws, kind, round, limit).map_err(couldnt)
     }
 
     /// A copy of the builder's session in the project, so the conversation travels with the
@@ -1387,6 +1396,10 @@ fn run_outcome(result: Result<Result<String, ToolError>, Box<dyn std::any::Any +
 /// request. Each "Try again" used to start another `max_rounds` of checks, with nothing counting
 /// across runs, so a build that never came up was checked 40 and 49 times (#736).
 pub const NOT_WORKING_CHECK_LIMIT: u32 = 10;
+
+/// How long a round of checks after a builder turn may take, as long as the builder's own
+/// ([`self_check::SELF_CHECK_LIMIT`]).
+pub const CHECK_ROUND_LIMIT: Duration = self_check::SELF_CHECK_LIMIT;
 
 fn not_working(ws: &Workspace) -> ToolError {
     ToolError::new(ErrorCode::OverLimit, format!("The build still isn't working after {} checks in a row, so it stopped.", ws.manifest.not_working_checks))

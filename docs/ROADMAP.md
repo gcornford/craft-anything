@@ -360,7 +360,7 @@ Every round spends the person's money or quota. One that can't do anything shoul
       `engine.session()` waits ignore Pause, so the button stayed on "Pausing…" — claimed: claude, branch bugfix/r5.3-pause-at-lock-waits
 - [x] A pause the worker doesn't answer within a minute still ends the run as paused and says what
       it was on, so the project can be retried — claimed: claude, branch bugfix/r5.3-pause-escalates
-- [ ] A program that has exited always ends its run (#1198): on Windows the process runner ended a
+- [x] A program that has exited always ends its run (#1198): on Windows the process runner ended a
       run with the process library's kill, which waits without limit for a job message that may
       already have been read, so a check never returned and no time limit could fire — claimed: claude, branch bugfix/r5.3-process-exit-wait
 

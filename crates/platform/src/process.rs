@@ -59,6 +59,8 @@ pub const DEFAULT_STDERR_CAP: usize = 1024 * 1024;
 /// How long to wait for the output threads after the child exits (an escaped grandchild may hold
 /// the pipe open; we stop waiting rather than hang).
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
+/// How long to wait for a killed group's leader to be gone before carrying on without it.
+const KILL_GRACE: Duration = Duration::from_secs(5);
 /// Longest partial line kept before it is delivered anyway. MCP servers answer `tools/list` as
 /// one JSON-RPC line that can be megabytes (a plugin with many richly described tools), so this
 /// must cover such a whole line: a fragment is not JSON, and the answer would never parse.
@@ -777,12 +779,10 @@ enum Stop {
 impl Supervisor {
     fn run(mut self) -> Result<Output, ToolError> {
         let stop = self.watch();
-        if !matches!(stop, Stop::Exited(_)) {
-            let _ = self.child.start_kill();
-            let _ = self.child.kill();
-        } else {
-            // The leader exited; take any leftover group members with it so they can't hold the pipes.
-            let _ = self.child.kill();
+        // Stopped at a deadline or a cancel; and when the leader exited, any leftover group
+        // members go with it so they can't hold the pipes.
+        if end_group(self.child.as_mut()).is_none() {
+            log::warn!("{}: still running after it was killed; not waiting for it", self.name);
         }
         self.drain();
         let duration = self.start.elapsed();
@@ -854,6 +854,23 @@ impl Supervisor {
             } else {
                 log::warn!("{}: output pipe still held open after exit; not waiting for it", self.name);
             }
+        }
+    }
+}
+
+/// Kill the whole group (Unix) or Job Object (Windows) and reap its leader, waiting at most
+/// [`KILL_GRACE`]: its exit status, if it was gone in time. Never the library's `kill()` or
+/// `wait()`: on Windows they wait without limit for a message from the job, and each `try_wait`
+/// reads one, so once the last had been read a program that had exited held its run for good (a
+/// check with a 30-minute limit sat for 50 on a program that exited after 4 s).
+fn end_group(child: &mut dyn ChildWrapper) -> Option<std::process::ExitStatus> {
+    let _ = child.start_kill();
+    let deadline = Instant::now() + KILL_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            _ => return None,
         }
     }
 }
@@ -1097,14 +1114,13 @@ impl Launched {
             return true;
         }
         let Some(child) = st.child.as_mut() else { return false };
-        let _ = child.kill();
-        match child.wait() {
-            Ok(status) => {
+        match end_group(child.as_mut()) {
+            Some(status) => {
                 st.ended = Some(Ended { code: status.code(), after: self.started.elapsed() });
                 st.child = None;
                 true
             }
-            Err(_) => false,
+            None => false,
         }
     }
 }
@@ -1447,6 +1463,34 @@ mod launch_tests {
     fn exits_with(code: u8) -> Process {
         let code = format!("exit {code}");
         if cfg!(windows) { Process::new("cmd").args(["/C", &code]) } else { Process::new("sh").args(["-c", &code]) }
+    }
+
+    /// On Windows each look at a program in a Job Object reads one of the job's messages, and the
+    /// library's `kill()` then waits without limit for another. A program whose messages had all
+    /// been read held its supervisor, and the run waiting for it, for good.
+    #[cfg(windows)]
+    #[test]
+    fn a_program_that_exited_ends_when_its_job_has_no_more_messages() {
+        let mut wrap = CommandWrap::with_new("cmd", |cmd| {
+            cmd.args(["/C", "exit 3"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        });
+        wrap.wrap(process_wrap::std::JobObject).wrap(process_wrap::std::CreationFlags(windows::Win32::System::Threading::CREATE_NO_WINDOW));
+        let mut child = spawn_retrying(|| wrap.spawn()).unwrap();
+        let started = Instant::now();
+        while child.try_wait().unwrap().is_none() {
+            assert!(started.elapsed() < Duration::from_secs(20), "cmd never exited");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Read whatever the job still posts (the exit, no processes left), one message a look.
+        let settled = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < settled {
+            child.try_wait().unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(end_group(child.as_mut()).and_then(|status| status.code())));
+        let code = rx.recv_timeout(Duration::from_secs(10)).expect("ending a program that had already exited never returned");
+        assert_eq!(code, Some(3));
     }
 
     #[test]

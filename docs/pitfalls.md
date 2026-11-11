@@ -236,6 +236,17 @@ the test process ended first, the orphaned PowerShell kept the test runner's out
 and `cargo test | grep` never returned. Screens never start programs, not even "in the
 background"; read a setting or a value a worker already has.
 
+**A wait with no limit, after the program was gone.** The process runner ended every run with the
+process library's `kill()`, which on Windows then waits without limit for a message from the
+program's Job Object. Each `try_wait` before it reads one message, so once they had read the last,
+a program that had exited held its supervisor for good: a build sat 50 minutes on "Checking its
+work (2 of 3): app-screenshot…" for a program that exited after 4 s, and the round's 30-minute
+limit couldn't fire because the run never came back. A deadline holds only when every step after
+it has one too: kill with `start_kill`, reap by polling `try_wait` under a grace
+(`process::end_group`), and never call a library's blocking `kill()` or `wait()` on a child. To
+find a hang on Windows with no child left, list the app's threads by name (`GetThreadDescription`):
+a `proc-<program>` thread that outlives its program is its supervisor.
+
 **Asking a process to stop isn't stopping it.** `RunningProcess::kill()` only raises a flag for the
 supervisor thread; the window-capture tool returned and the CLI exited before the thread acted, so
 the program it opened stayed open (and held the shell's pipe, so the command never returned). When
